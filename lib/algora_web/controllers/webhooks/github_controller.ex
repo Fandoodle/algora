@@ -343,56 +343,55 @@ defmodule AlgoraWeb.Webhooks.GithubController do
         "pull_request" -> {:ticket, payload["pull_request"]["id"]}
       end
 
-    ticket_number = get_github_ticket(webhook)["number"]
+    # Fix for Issue #141: Prevent duplicate bounty posts on edit
+    is_duplicate = 
+      event_action in ["issue_comment.edited", "issues.edited", "pull_request.edited"] and
+      not is_nil(Repo.get_by(Algora.Bounties.CommandResponse, 
+          provider: "github", 
+          provider_command_id: to_string(command_id), 
+          command_source: command_source))
 
-    strategy = :set
-    # strategy =
-    #   case Repo.get_by(CommandResponse,
-    #          provider: "github",
-    #          provider_command_id: to_string(command_id),
-    #          command_source: command_source
-    #        ) do
-    #     nil -> :increase
-    #     _ -> :set
-    #   end
-
-    # TODO: community bounties?
-    with {:ok, role} <- authorize_user(webhook),
-         true <- Member.can_create_bounty?(role),
-         {:ok, token} <- Github.get_installation_token(payload["installation"]["id"]),
-         {:ok, installation} <-
-           Workspace.fetch_installation_by(
-             provider: "github",
-             provider_id: to_string(payload["installation"]["id"])
-           ),
-         {:ok, owner} <- Accounts.fetch_user_by(id: installation.connected_user_id),
-         {:ok, creator} <- Workspace.ensure_user(token, author["login"]) do
-      Bounties.create_bounty(
-        %{
-          creator: creator,
-          owner: owner,
-          amount: amount,
-          ticket_ref: %{
-            owner: payload["repository"]["owner"]["login"],
-            repo: payload["repository"]["name"],
-            number: ticket_number
-          }
-        },
-        strategy: strategy,
-        installation_id: payload["installation"]["id"],
-        command_id: command_id,
-        command_source: command_source
-      )
+    if is_duplicate do
+      {:ok, nil}
     else
-      false ->
-        {:error, :unauthorized}
+      ticket_number = get_github_ticket(webhook)["number"]
+      strategy = :set
 
-      {:error, _reason} = error ->
-        error
+      with {:ok, role} <- authorize_user(webhook),
+           true <- Member.can_create_bounty?(role),
+           {:ok, token} <- Github.get_installation_token(payload["installation"]["id"]),
+           {:ok, installation} <-
+             Workspace.fetch_installation_by(
+               provider: "github",
+               provider_id: to_string(payload["installation"]["id"])
+             ),
+           {:ok, owner} <- Accounts.fetch_user_by(id: installation.connected_user_id),
+           {:ok, creator} <- Workspace.ensure_user(token, author["login"]) do
+        Bounties.create_bounty(
+          %{
+            creator: creator,
+            owner: owner,
+            amount: amount,
+            ticket_ref: %{
+              owner: payload["repository"]["owner"]["login"],
+              repo: payload["repository"]["name"],
+              number: ticket_number
+            }
+          },
+          strategy: strategy,
+          installation_id: payload["installation"]["id"],
+          command_id: command_id,
+          command_source: command_source
+        )
+      else
+        false ->
+          {:error, :unauthorized}
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
-
-  defp execute_command(%Webhook{event_action: event_action, payload: payload} = webhook, {:tip, args})
        when event_action in [
               "issue_comment.created",
               "issue_comment.edited",
